@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Agent Dashboard</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; padding: 2em; }
+    .trace { margin-bottom: 1em; }
+  </style>
+</head>
+<body>
+  <h1>🧠 Agent Dashboard</h1>
+  <div id="trace"></div>
+
+  <script>
+    const traceDiv = document.getElementById("trace");
+    const evtSource = new EventSource("/complex-attention");
+
+    evtSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      console.log("Collapsed:", data.collapsed);
+      console.log("Entropy:", data.entropy);
+
+      traceDiv.innerHTML = `
+        <div class="trace">
+          <strong>Collapsed:</strong> ${JSON.stringify(data.collapsed)}<br>
+          <strong>Entropy:</strong> ${JSON.stringify(data.entropy)}
+        </div>
+      `;
+    };
+  </script>
+</body>
+</html>
