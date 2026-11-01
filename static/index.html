@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AgentDash Cockpit</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; padding: 2em; }
+    .panel { background: #1a1a1a; border: 1px solid #333; padding: 1.5em; margin-bottom: 1.5em; border-radius: 6px; }
+    textarea { width: 100%; max-width: 600px; background: #222; color: #eee; border: 1px solid #444; padding: 0.5em; border-radius: 4px; }
+    button { background: #6200ee; color: white; border: none; padding: 0.6em 1.2em; font-weight: bold; border-radius: 4px; cursor: pointer; margin-top: 0.5em; }
+    button:hover { background: #7b1fa2; }
+    ul { margin: 0; padding-left: 1.2em; }
+    .trace { margin-bottom: 1em; font-family: monospace; font-size: 0.9em; color: #b388ff; }
+  </style>
+</head>
+<body>
+  <h1>🧠 AgentDash Cockpit</h1>
+
+  <!-- Investigation Control Panel -->
+  <div class="panel">
+    <h2>Run Investigation</h2>
+    <textarea id="questionInput" rows="3" placeholder="Type your investigation question here... (e.g., How should symbolic memory work?)"></textarea>
+    <br>
+    <button id="runBtn">Run Investigation</button>
+  </div>
+
+  <!-- Live Status Panel -->
+  <div class="panel">
+    <h2>Investigation Status</h2>
+    <p><strong>Investigation ID:</strong> <span id="invId">-</span></p>
+    <p><strong>Status:</strong> <span id="status">Idle</span></p>
+    <p><strong>Progress:</strong> <span id="progress">0%</span></p>
+    
+    <h3>Trace History</h3>
+    <ul id="traceHistory"><li>-</li></ul>
+    
+    <h3>Observation</h3>
+    <div id="observation">-</div>
+  </div>
+
+  <!-- Complex Attention Stream Panel -->
+  <div class="panel">
+    <h2>Complex Attention Metrics</h2>
+    <div id="attentionTrace" class="trace">Waiting for attention data...</div>
+  </div>
+
+  <script>
+    // 1. Handle Investigation Trigger
+    document.getElementById("runBtn").addEventListener("click", async () => {
+      const question = document.getElementById("questionInput").value.trim();
+      if (!question) {
+        alert("Please enter a question.");
+        return;
+      }
+      
+      const res = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question })
+      });
+      const data = await res.json();
+      if (!data.success) {
+        alert("Error: " + (data.error || "Failed to start investigation"));
+      }
+    });
+
+    // 2. Consume Main Dashboard & Investigation SSE Stream (/stream)
+    const dashboardSource = new EventSource("/stream");
+    dashboardSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type !== "dashboard") return;
+      
+      document.getElementById("invId").textContent = data.investigation_id || "-";
+      document.getElementById("status").textContent = data.status;
+      document.getElementById("progress").textContent = data.progress + "%";
+      document.getElementById("observation").textContent = data.observation || "-";
+      
+      // Render Trace History
+      const historyList = document.getElementById("traceHistory");
+      if (data.trace_history && data.trace_history.length > 0) {
+        historyList.innerHTML = data.trace_history.map(t => `<li>${t}</li>`).join("");
+      } else {
+        historyList.innerHTML = "<li>-</li>";
+      }
+    };
+
+    // 3. Consume Complex Attention SSE Stream (/complex-attention)
+    const attentionDiv = document.getElementById("attentionTrace");
+    const attentionSource = new EventSource("/complex-attention");
+
+    attentionSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      attentionDiv.innerHTML = `
+        <strong>Collapsed:</strong> ${JSON.stringify(data.collapsed)}<br>
+        <strong>Entropy:</strong> ${JSON.stringify(data.entropy)}
+      `;
+    };
+  </script>
+</body>
+</html>
