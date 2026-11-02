@@ -1,0 +1,7 @@
+dash
+fastapi
+numpy
+plotly
+torch
+transformers
+uvicorn[standard]

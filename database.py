@@ -47,6 +47,26 @@ def init_db() -> None:
             connection.execute(
                 "ALTER TABLE investigations ADD COLUMN agent_results TEXT NOT NULL DEFAULT '{}'"
             )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                normalized_name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS investigation_memory (
+                investigation_id INTEGER NOT NULL,
+                node_id INTEGER NOT NULL,
+                PRIMARY KEY (investigation_id, node_id),
+                FOREIGN KEY (investigation_id) REFERENCES investigations(id),
+                FOREIGN KEY (node_id) REFERENCES memory_nodes(id)
+            )
+            """
+        )
 
 
 def create_investigation(question: str) -> int:
@@ -91,6 +111,38 @@ def update_investigation(
             raise LookupError(f"Investigation {investigation_id} was not found.")
 
 
+def save_investigation_concepts(investigation_id: int, concepts: list[str]) -> None:
+    with _connection() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM investigations WHERE id = ?", (investigation_id,)
+        ).fetchone()
+        if exists is None:
+            raise LookupError(f"Investigation {investigation_id} was not found.")
+        for concept in concepts:
+            normalized_name = concept.casefold()
+            connection.execute(
+                """
+                INSERT INTO memory_nodes (normalized_name, name)
+                VALUES (?, ?)
+                ON CONFLICT(normalized_name) DO NOTHING
+                """,
+                (normalized_name, concept),
+            )
+            node = connection.execute(
+                "SELECT id FROM memory_nodes WHERE normalized_name = ?",
+                (normalized_name,),
+            ).fetchone()
+            if node is None:
+                raise RuntimeError(f"Memory node {concept!r} could not be retrieved.")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO investigation_memory (investigation_id, node_id)
+                VALUES (?, ?)
+                """,
+                (investigation_id, node["id"]),
+            )
+
+
 def get_all_investigations() -> list[dict[str, object]]:
     with _connection() as connection:
         rows = connection.execute(
@@ -105,5 +157,49 @@ def get_all_investigations() -> list[dict[str, object]]:
         for row in rows:
             investigation = dict(row)
             investigation["agent_results"] = json.loads(investigation["agent_results"])
+            investigation["concepts"] = []
+            investigation["related_investigations"] = []
             investigations.append(investigation)
+        memory_rows = connection.execute(
+            """
+            SELECT current.investigation_id, node.name,
+                   previous.id AS related_id, previous.question AS related_question
+            FROM investigation_memory AS current
+            JOIN memory_nodes AS node ON node.id = current.node_id
+            LEFT JOIN investigation_memory AS match
+                ON match.node_id = current.node_id
+                AND match.investigation_id < current.investigation_id
+            LEFT JOIN investigations AS previous
+                ON previous.id = match.investigation_id
+                AND previous.status = 'Complete'
+            ORDER BY current.investigation_id, node.normalized_name, previous.id
+            """
+        ).fetchall()
+        by_id = {investigation["id"]: investigation for investigation in investigations}
+        for row in memory_rows:
+            current = by_id.get(row["investigation_id"])
+            if current is None:
+                continue
+            if row["name"] not in current["concepts"]:
+                current["concepts"].append(row["name"])
+            related_id = row["related_id"]
+            if related_id is None:
+                continue
+            related = next(
+                (
+                    item
+                    for item in current["related_investigations"]
+                    if item["id"] == related_id
+                ),
+                None,
+            )
+            if related is None:
+                related = {
+                    "id": related_id,
+                    "question": row["related_question"],
+                    "shared_concepts": [],
+                }
+                current["related_investigations"].append(related)
+            if row["name"] not in related["shared_concepts"]:
+                related["shared_concepts"].append(row["name"])
         return investigations

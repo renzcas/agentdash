@@ -4,8 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import torch
+
 import database
 from agents.pipeline import run_agents
+from modules.complex_attention import (
+    build_complex_attention,
+    collapse_attention,
+    phase_entropy,
+)
+from modules.symbolic_memory import extract_concepts
 
 
 class AgentPipelineTests(unittest.TestCase):
@@ -76,6 +84,53 @@ class InvestigationDatabaseTests(unittest.TestCase):
         legacy_investigation = database.get_all_investigations()[1]
         self.assertEqual(legacy_investigation["question"], "Legacy question")
         self.assertEqual(legacy_investigation["agent_results"], {})
+
+    def test_persists_concepts_and_finds_prior_investigations(self) -> None:
+        database.init_db()
+        earlier_id = database.create_investigation("Symbolic memory design")
+        later_id = database.create_investigation("How should memory work?")
+        database.update_investigation(earlier_id, status="Complete")
+        database.update_investigation(later_id, status="Complete")
+        database.save_investigation_concepts(earlier_id, ["symbolic", "memory"])
+        database.save_investigation_concepts(later_id, ["memory", "memory"])
+
+        investigations = database.get_all_investigations()
+        later = investigations[0]
+
+        self.assertEqual(later["concepts"], ["memory"])
+        self.assertEqual(
+            later["related_investigations"],
+            [
+                {
+                    "id": earlier_id,
+                    "question": "Symbolic memory design",
+                    "shared_concepts": ["memory"],
+                }
+            ],
+        )
+        self.assertEqual(investigations[1]["related_investigations"], [])
+
+
+class ComplexAttentionTests(unittest.TestCase):
+    def test_builds_complex_values_for_all_layers_and_batches(self) -> None:
+        attention = torch.full((2, 1, 3, 4, 4), 0.25)
+
+        complex_attention = build_complex_attention(attention)
+        collapsed = collapse_attention(complex_attention)
+        entropy = phase_entropy(complex_attention)
+
+        self.assertEqual(complex_attention.shape, attention.shape)
+        self.assertEqual(collapsed.shape, attention.shape)
+        self.assertTrue(torch.isfinite(collapsed).all())
+        self.assertTrue(torch.isfinite(entropy).all())
+
+
+class SymbolicMemoryTests(unittest.TestCase):
+    def test_extracts_unique_keywords_without_common_question_words(self) -> None:
+        self.assertEqual(
+            extract_concepts("How should symbolic memory work? SYMBOLIC memory"),
+            ["symbolic", "memory"],
+        )
 
 
 if __name__ == "__main__":

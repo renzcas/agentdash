@@ -123,6 +123,25 @@
         observation.textContent = investigation.observation || "Observation pending";
         const insight = document.createElement("p");
         insight.textContent = investigation.insight || "Insight pending";
+        const memory = document.createElement("p");
+        memory.className = "muted";
+        memory.textContent = investigation.concepts?.length
+          ? `Memory symbols: ${investigation.concepts.join(", ")}`
+          : "Memory symbols: none detected";
+        const related = document.createElement("div");
+        related.className = "muted";
+        if (investigation.related_investigations?.length) {
+          const label = document.createElement("p");
+          label.textContent = "Related past investigations:";
+          related.append(label);
+          const relatedList = document.createElement("ul");
+          for (const prior of investigation.related_investigations) {
+            const item = document.createElement("li");
+            item.textContent = `#${prior.id}: ${prior.question} (shared: ${prior.shared_concepts.join(", ")})`;
+            relatedList.append(item);
+          }
+          related.append(relatedList);
+        }
         const agentDetails = document.createElement("details");
         const agentSummary = document.createElement("summary");
         agentSummary.textContent = "Six agent results";
@@ -130,7 +149,7 @@
         const created = document.createElement("p");
         created.className = "muted";
         created.textContent = investigation.created_at;
-        card.append(title, question, observation, insight, agentDetails, created);
+        card.append(title, question, observation, insight, memory, related, agentDetails, created);
         history.append(card);
       }
     }

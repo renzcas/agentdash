@@ -11,11 +11,18 @@ import torch
 
 from agents import PILLARS
 from agents.pipeline import run_agents
-from database import create_investigation, get_all_investigations, init_db, update_investigation
+from database import (
+    create_investigation,
+    get_all_investigations,
+    init_db,
+    save_investigation_concepts,
+    update_investigation,
+)
+from modules.symbolic_memory import extract_concepts
 from state import state
 
 tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-model = AutoModel.from_pretrained("bert-base-uncased")
+model = AutoModel.from_pretrained("bert-base-uncased", attn_implementation="eager")
 
 input_ids = tokenizer("The agent is thinking...", return_tensors="pt")["input_ids"]
 app = FastAPI()
@@ -59,6 +66,8 @@ def investigation_worker(question: str, investigation_id: int) -> None:
         )
 
         results = run_agents(question)
+        concepts = extract_concepts(question)
+        save_investigation_concepts(investigation_id, concepts)
         for index, (agent_name, result) in enumerate(results.items(), start=1):
             state["agent_results"][agent_name] = result
             state["status"] = f"{agent_name} Agent"
