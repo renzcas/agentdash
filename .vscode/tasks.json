@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "AgentDash server on port 8000",
+			"type": "shell",
+			"command": "python -m uvicorn server:app --host 127.0.0.1 --port 8000",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
