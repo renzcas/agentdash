@@ -11,6 +11,15 @@
     button:hover { background: #7b1fa2; }
     ul { margin: 0; padding-left: 1.2em; }
     .trace { margin-bottom: 1em; font-family: monospace; font-size: 0.9em; color: #b388ff; }
+    .pillars, .history { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0.75em; }
+    .pillar, .investigation { background: #222; border: 1px solid #444; padding: 1em; border-radius: 4px; }
+    .pillar h3, .investigation h3 { margin: 0 0 0.5em; color: #b388ff; }
+    .muted { color: #aaa; font-size: 0.9em; }
+    #error { color: #ff8a80; }
+    .agent-results { display: grid; gap: 0.5em; margin-top: 0.75em; }
+    .agent-result { border-left: 2px solid #7b1fa2; padding-left: 0.75em; }
+    .agent-result h4 { margin: 0 0 0.25em; color: #b388ff; }
+    .agent-result p { margin: 0.25em 0; }
   </style>
 </head>
 <body>
@@ -36,6 +45,22 @@
     
     <h3>Observation</h3>
     <div id="observation">-</div>
+    <h3>Insight</h3>
+    <div id="insight">-</div>
+    <h3>Agent Results</h3>
+    <div id="agentResults" class="agent-results">Waiting for an investigation...</div>
+    <p id="error" role="alert"></p>
+  </div>
+
+  <div class="panel">
+    <h2>Six Pillars</h2>
+    <div id="pillars" class="pillars">Loading pillars...</div>
+  </div>
+
+  <div class="panel">
+    <h2>Investigation History</h2>
+    <p class="muted">Saved investigations remain here after you refresh the page.</p>
+    <div id="history" class="history">Loading saved investigations...</div>
   </div>
 
   <!-- Complex Attention Stream Panel -->
@@ -53,19 +78,111 @@
         return;
       }
       
-      const res = await fetch("/api/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question })
-      });
-      const data = await res.json();
-      if (!data.success) {
-        alert("Error: " + (data.error || "Failed to start investigation"));
+      const runButton = document.getElementById("runBtn");
+      runButton.disabled = true;
+      document.getElementById("error").textContent = "";
+      try {
+        const res = await fetch("/api/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "Failed to start investigation");
+        }
+        document.getElementById("invId").textContent = data.investigation_id;
+        await loadHistory();
+      } catch (error) {
+        document.getElementById("error").textContent = error.message;
+      } finally {
+        runButton.disabled = false;
       }
     });
 
+    async function loadHistory() {
+      const history = document.getElementById("history");
+      const response = await fetch("/api/investigations");
+      if (!response.ok) {
+        throw new Error("Could not load investigation history.");
+      }
+      const investigations = await response.json();
+      history.replaceChildren();
+      if (investigations.length === 0) {
+        history.textContent = "No saved investigations yet.";
+        return;
+      }
+      for (const investigation of investigations) {
+        const card = document.createElement("article");
+        card.className = "investigation";
+        const title = document.createElement("h3");
+        title.textContent = `#${investigation.id} · ${investigation.status}`;
+        const question = document.createElement("p");
+        question.textContent = investigation.question;
+        const observation = document.createElement("p");
+        observation.textContent = investigation.observation || "Observation pending";
+        const insight = document.createElement("p");
+        insight.textContent = investigation.insight || "Insight pending";
+        const agentDetails = document.createElement("details");
+        const agentSummary = document.createElement("summary");
+        agentSummary.textContent = "Six agent results";
+        agentDetails.append(agentSummary, renderAgentResults(investigation.agent_results));
+        const created = document.createElement("p");
+        created.className = "muted";
+        created.textContent = investigation.created_at;
+        card.append(title, question, observation, insight, agentDetails, created);
+        history.append(card);
+      }
+    }
+
+    function renderAgentResults(results) {
+      const container = document.createElement("div");
+      container.className = "agent-results";
+      for (const [agentName, result] of Object.entries(results || {})) {
+        const section = document.createElement("section");
+        section.className = "agent-result";
+        const heading = document.createElement("h4");
+        heading.textContent = agentName;
+        section.append(heading);
+        for (const [key, value] of Object.entries(result)) {
+          if (key === "agent" || key === "status") continue;
+          const output = document.createElement("p");
+          output.textContent = `${key}: ${value}`;
+          section.append(output);
+        }
+        container.append(section);
+      }
+      if (container.childElementCount === 0) {
+        container.textContent = "Agent results will appear when processing begins.";
+      }
+      return container;
+    }
+
+    async function loadPillars() {
+      const container = document.getElementById("pillars");
+      const response = await fetch("/api/pillars");
+      if (!response.ok) {
+        throw new Error("Could not load the six pillars.");
+      }
+      const pillars = await response.json();
+      container.replaceChildren();
+      for (const pillar of pillars) {
+        const card = document.createElement("article");
+        card.className = "pillar";
+        const title = document.createElement("h3");
+        title.textContent = `${pillar.name} · ${pillar.action}`;
+        const agent = document.createElement("strong");
+        agent.textContent = `${pillar.agent} Agent`;
+        const purpose = document.createElement("p");
+        purpose.textContent = pillar.purpose;
+        card.append(title, agent, purpose);
+        container.append(card);
+      }
+    }
+
     // 2. Consume Main Dashboard & Investigation SSE Stream (/stream)
     const dashboardSource = new EventSource("/stream");
+    let lastCompletedInvestigation = null;
     dashboardSource.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type !== "dashboard") return;
@@ -74,15 +191,38 @@
       document.getElementById("status").textContent = data.status;
       document.getElementById("progress").textContent = data.progress + "%";
       document.getElementById("observation").textContent = data.observation || "-";
+      document.getElementById("insight").textContent = data.insight || "-";
+      document.getElementById("error").textContent = data.error || "";
+      document.getElementById("agentResults").replaceChildren(
+        renderAgentResults(data.agent_results)
+      );
       
       // Render Trace History
       const historyList = document.getElementById("traceHistory");
       if (data.trace_history && data.trace_history.length > 0) {
-        historyList.innerHTML = data.trace_history.map(t => `<li>${t}</li>`).join("");
+        historyList.replaceChildren();
+        for (const trace of data.trace_history) {
+          const item = document.createElement("li");
+          item.textContent = trace;
+          historyList.append(item);
+        }
       } else {
-        historyList.innerHTML = "<li>-</li>";
+        historyList.replaceChildren(Object.assign(document.createElement("li"), { textContent: "-" }));
+      }
+      if (["Complete", "Failed"].includes(data.status) && lastCompletedInvestigation !== data.investigation_id) {
+        lastCompletedInvestigation = data.investigation_id;
+        loadHistory().catch(error => {
+          document.getElementById("error").textContent = error.message;
+        });
       }
     };
+
+    loadHistory().catch(error => {
+      document.getElementById("history").textContent = error.message;
+    });
+    loadPillars().catch(error => {
+      document.getElementById("pillars").textContent = error.message;
+    });
 
     // 3. Consume Complex Attention SSE Stream (/complex-attention)
     const attentionDiv = document.getElementById("attentionTrace");
