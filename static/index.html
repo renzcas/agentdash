@@ -20,6 +20,17 @@
     .agent-result { border-left: 2px solid #7b1fa2; padding-left: 0.75em; }
     .agent-result h4 { margin: 0 0 0.25em; color: #b388ff; }
     .agent-result p { margin: 0.25em 0; }
+    .ecology-metrics { display: grid; gap: 0.6em; }
+    .ecology-metric { display: grid; grid-template-columns: minmax(130px, 1fr) 3fr 3.5em; align-items: center; gap: 0.75em; }
+    .ecology-track { height: 0.7em; background: #333; border-radius: 1em; overflow: hidden; }
+    .ecology-bar { height: 100%; background: #b388ff; transition: width 250ms ease; }
+    .wave-chart { width: 100%; max-height: 220px; background: #151515; border: 1px solid #333; border-radius: 4px; }
+    .wave-fluctuation { fill: none; stroke: #b388ff; stroke-width: 2; }
+    .wave-attention { fill: none; stroke: #26c6da; stroke-width: 2; }
+    @media (max-width: 600px) {
+      body { padding: 1em; }
+      .ecology-metric { grid-template-columns: minmax(100px, 1fr) 2fr 3em; gap: 0.4em; font-size: 0.85em; }
+    }
   </style>
 </head>
 <body>
@@ -58,6 +69,20 @@
   </div>
 
   <div class="panel">
+    <h2>Information Ecology</h2>
+    <p id="ecologySummary" class="muted" aria-live="polite">Waiting for ecology data...</p>
+    <div id="ecologyMetrics" class="ecology-metrics"></div>
+    <h3>MindWaves · Fluctuation and attention</h3>
+    <p id="mindwavesSummary" class="muted">Waiting for the first metric snapshot...</p>
+    <svg class="wave-chart" viewBox="0 0 400 120" role="img" aria-label="Recent ecology fluctuation and attention scores">
+      <line x1="12" y1="100" x2="388" y2="100" stroke="#555" />
+      <polyline id="fluctuationWave" class="wave-fluctuation" points=""></polyline>
+      <polyline id="attentionWave" class="wave-attention" points=""></polyline>
+    </svg>
+    <p class="muted">Purple: mean metric fluctuation · Cyan: attention score</p>
+  </div>
+
+  <div class="panel">
     <h2>Investigation History</h2>
     <p class="muted">Saved investigations remain here after you refresh the page.</p>
     <div id="history" class="history">Loading saved investigations...</div>
@@ -92,6 +117,7 @@
           throw new Error(data.detail || "Failed to start investigation");
         }
         document.getElementById("invId").textContent = data.investigation_id;
+        connectEcology(`investigation:${data.investigation_id}`);
         await loadHistory();
       } catch (error) {
         document.getElementById("error").textContent = error.message;
@@ -177,6 +203,57 @@
       return container;
     }
 
+    function renderEcology(data) {
+      const snapshot = data.snapshot;
+      const metrics = document.getElementById("ecologyMetrics");
+      if (!snapshot) {
+        document.getElementById("ecologySummary").textContent = "Waiting for an investigation or an ecology evaluation.";
+        metrics.replaceChildren();
+      } else {
+        document.getElementById("ecologySummary").textContent =
+          `${snapshot.signal_count} signals · 11 bounded metrics`;
+        metrics.replaceChildren();
+        for (const [name, rawValue] of Object.entries(snapshot.scores)) {
+          const value = Number(rawValue);
+          const row = document.createElement("div");
+          row.className = "ecology-metric";
+          const label = document.createElement("span");
+          label.textContent = name.replaceAll("_", " ");
+          const track = document.createElement("div");
+          track.className = "ecology-track";
+          const bar = document.createElement("div");
+          bar.className = "ecology-bar";
+          bar.style.width = `${Math.max(0, Math.min(1, value)) * 100}%`;
+          bar.setAttribute("role", "meter");
+          bar.setAttribute("aria-label", name);
+          bar.setAttribute("aria-valuemin", "0");
+          bar.setAttribute("aria-valuemax", "1");
+          bar.setAttribute("aria-valuenow", String(value));
+          track.append(bar);
+          const score = document.createElement("span");
+          score.textContent = value.toFixed(2);
+          row.append(label, track, score);
+          metrics.append(row);
+        }
+      }
+
+      const mindwaves = data.mindwaves || {};
+      const history = mindwaves.history || [];
+      document.getElementById("mindwavesSummary").textContent = history.length
+        ? `Step ${mindwaves.step} · fluctuation ${Number(mindwaves.fluctuation).toFixed(3)} · attention ${Number(mindwaves.attention).toFixed(2)} · attention change ${Number(mindwaves.attention_delta).toFixed(2)}`
+        : "Waiting for the first metric snapshot...";
+      const visibleHistory = history.slice(-60);
+      const pointsFor = (key) => visibleHistory.map((point, index) => {
+        const x = visibleHistory.length < 2
+          ? 200
+          : 12 + (index * 376) / (visibleHistory.length - 1);
+        const y = 100 - Math.max(0, Math.min(1, Number(point[key]))) * 80;
+        return `${x},${y}`;
+      }).join(" ");
+      document.getElementById("fluctuationWave").setAttribute("points", pointsFor("fluctuation"));
+      document.getElementById("attentionWave").setAttribute("points", pointsFor("attention"));
+    }
+
     async function loadPillars() {
       const container = document.getElementById("pillars");
       const response = await fetch("/api/pillars");
@@ -207,6 +284,9 @@
       if (data.type !== "dashboard") return;
       
       document.getElementById("invId").textContent = data.investigation_id || "-";
+      if (data.investigation_id && data.status !== "Idle") {
+        connectEcology(`investigation:${data.investigation_id}`);
+      }
       document.getElementById("status").textContent = data.status;
       document.getElementById("progress").textContent = data.progress + "%";
       document.getElementById("observation").textContent = data.observation || "-";
@@ -242,6 +322,29 @@
     loadPillars().catch(error => {
       document.getElementById("pillars").textContent = error.message;
     });
+
+    const browserSessionKey = "agentdash-ecology-session";
+    const browserSessionId = sessionStorage.getItem(browserSessionKey)
+      || `browser:${crypto.randomUUID()}`;
+    sessionStorage.setItem(browserSessionKey, browserSessionId);
+    let activeEcologySession = null;
+    let ecologySource = null;
+    function connectEcology(sessionId) {
+      if (sessionId === activeEcologySession) return;
+      activeEcologySession = sessionId;
+      if (ecologySource) ecologySource.close();
+      ecologySource = new EventSource(
+        `/api/ecology/stream?session_id=${encodeURIComponent(sessionId)}`
+      );
+      ecologySource.onmessage = (event) => {
+        renderEcology(JSON.parse(event.data));
+      };
+      ecologySource.onerror = () => {
+        document.getElementById("ecologySummary").textContent =
+          "Ecology stream disconnected; reconnecting...";
+      };
+    }
+    connectEcology(browserSessionId);
 
     // 3. Consume Complex Attention SSE Stream (/complex-attention)
     const attentionDiv = document.getElementById("attentionTrace");

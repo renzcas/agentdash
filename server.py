@@ -1,7 +1,18 @@
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
-from fastapi.responses import StreamingResponse
+import asyncio
+import math
+from fastapi import (
+    FastAPI,
+    Request,
+    BackgroundTasks,
+    HTTPException,
+    Query,
+)
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from functools import lru_cache
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from typing import Annotated
+from uuid import uuid4
 import platform, sys, time, json, os
 from modules.trace_utils import stream_trace
 from pulse import emit_pulse
@@ -16,14 +27,75 @@ from database import (
     save_investigation_concepts,
     update_investigation,
 )
+from modules.cognitive.information_space.engine import InformationSignal
+from modules.cognitive.runtime import cognitive_runtime
 from modules.symbolic_memory import extract_concepts
 from state import state
 
 app = FastAPI()
 
 
+def _json_safe_validation_details(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, BaseException):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_validation_details(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_validation_details(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_response(
+    request: Request, exception: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _json_safe_validation_details(exception.errors())},
+    )
+
+
+UnitScore = Annotated[
+    float,
+    Field(ge=0.0, le=1.0, allow_inf_nan=False, strict=True),
+]
+
+
 class InvestigationRequest(BaseModel):
     question: str
+
+
+class InformationSignalRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    source: str = Field(default="unspecified", min_length=1, max_length=200)
+    confidence: UnitScore = 0.5
+    relevance: UnitScore = 0.5
+    novelty: UnitScore = 0.5
+    attention: UnitScore = 0.5
+    retention: UnitScore = 0.5
+    prediction_error: UnitScore = 0.5
+    goal_alignment: UnitScore = 0.5
+    utility: UnitScore = 0.5
+
+    @field_validator("content", "source")
+    @classmethod
+    def require_non_whitespace(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be empty or whitespace")
+        return normalized
+
+
+class EcologyEvaluationRequest(BaseModel):
+    signals: list[InformationSignalRequest] = Field(max_length=100)
+    session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
 
 
 @app.on_event("startup")
@@ -62,7 +134,9 @@ def investigation_worker(question: str, investigation_id: int) -> None:
         results = run_agents(question)
         concepts = extract_concepts(question)
         save_investigation_concepts(investigation_id, concepts)
+        completed_agent_results = {}
         for index, (agent_name, result) in enumerate(results.items(), start=1):
+            completed_agent_results[agent_name] = result
             state["agent_results"][agent_name] = result
             state["status"] = f"{agent_name} Agent"
             state["trace"] = next(
@@ -76,6 +150,23 @@ def investigation_worker(question: str, investigation_id: int) -> None:
                 status=state["status"],
                 progress=state["progress"],
                 agent_results=json.dumps(state["agent_results"]),
+            )
+            signals = [
+                InformationSignal(
+                    content=" ".join(
+                        str(value).strip()
+                        for key, value in agent_result.items()
+                        if key not in {"agent", "status"} and str(value).strip()
+                    )[:2000]
+                    or completed_agent,
+                    source=completed_agent,
+                    attention=1.0 if completed_agent == agent_name else 0.0,
+                )
+                for completed_agent, agent_result in completed_agent_results.items()
+            ]
+            cognitive_runtime.evaluate(
+                signals,
+                session_id=f"investigation:{investigation_id}",
             )
 
         state["observation"] = results["Observer"]["observation"]
@@ -128,6 +219,40 @@ async def list_investigations():
 @app.get("/api/pillars")
 async def list_pillars():
     return PILLARS
+
+
+@app.post("/api/ecology/evaluate")
+async def evaluate_ecology(payload: EcologyEvaluationRequest):
+    signals = [
+        InformationSignal(**signal.model_dump())
+        for signal in payload.signals
+    ]
+    session_id = payload.session_id or f"session:{uuid4()}"
+    return cognitive_runtime.evaluate(signals, session_id=session_id)
+
+
+@app.get("/api/ecology/stream")
+async def stream_ecology(
+    request: Request,
+    session_id: Annotated[
+        str,
+        Query(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        ),
+    ],
+):
+    async def generate():
+        while not await request.is_disconnected():
+            yield (
+                "data: "
+                f"{json.dumps(cognitive_runtime.current_state(session_id=session_id))}\n\n"
+            )
+            await asyncio.sleep(1)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 
 def event_stream():
     session_id = f"session_{int(time.time())}"
