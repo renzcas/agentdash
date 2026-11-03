@@ -1,13 +1,11 @@
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
+from functools import lru_cache
 from pydantic import BaseModel
 import platform, sys, time, json, os
 from modules.trace_utils import stream_trace
 from pulse import emit_pulse
-from modules.complex_attention import build_complex_attention, collapse_attention, phase_entropy
 from fastapi.staticfiles import StaticFiles
-from transformers import AutoModel, AutoTokenizer
-import torch
 
 from agents import PILLARS
 from agents.pipeline import run_agents
@@ -21,10 +19,6 @@ from database import (
 from modules.symbolic_memory import extract_concepts
 from state import state
 
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-model = AutoModel.from_pretrained("bert-base-uncased", attn_implementation="eager")
-
-input_ids = tokenizer("The agent is thinking...", return_tensors="pt")["input_ids"]
 app = FastAPI()
 
 
@@ -178,8 +172,22 @@ def event_stream():
 async def stream(request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+@lru_cache(maxsize=1)
+def load_attention_model():
+    from transformers import AutoModel, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    model = AutoModel.from_pretrained("bert-base-uncased", attn_implementation="eager")
+    input_ids = tokenizer("The agent is thinking...", return_tensors="pt")["input_ids"]
+    return model, input_ids
+
+
 @app.get("/complex-attention")
-async def stream_complex_attention(request: Request):
+def stream_complex_attention():
+    import torch
+    from modules.complex_attention import build_complex_attention, collapse_attention, phase_entropy
+
+    model, input_ids = load_attention_model()
     outputs = model(input_ids, output_attentions=True)
     attention_tensor = torch.stack(outputs.attentions)
 
